@@ -108,6 +108,20 @@ class Program
                                 },
                                 new Tool
                                 {
+                                    Name = "DeleteDocument",
+                                    Description = "Deletes an uploaded HR document by its ID.",
+                                    InputSchema = new JsonSchema
+                                    {
+                                        Type = "object",
+                                        Properties = new Dictionary<string, JsonSchemaProperty>
+                                        {
+                                            ["id"] = new JsonSchemaProperty { Type = "string", Description = "The ID (GUID) of the document to delete" }
+                                        },
+                                        Required = new List<string> { "id" }
+                                    }
+                                },
+                                new Tool
+                                {
                                     Name = "GetContractsForEmployee",
                                     Description = "Fetches the contract document(s) for a specific employee, including their content.",
                                     InputSchema = new JsonSchema
@@ -234,6 +248,28 @@ class Program
                                 .Where(d => d.Type == "Policy")
                                 .ToListAsync(cancellationToken);
                             return JsonResponse(policies.Select(ToDtoWithContent));
+                        }
+
+                        // Deletes a document by id.
+                        if (request.Params?.Name == "DeleteDocument")
+                        {
+                            if (request.Params.Arguments?.TryGetValue("id", out var idArg) is not true || idArg is null ||
+                                !Guid.TryParse(idArg.ToString(), out var docId))
+                            {
+                                throw new McpServerException("Missing or invalid required argument 'id'");
+                            }
+
+                            await using var db = new EmployeeDbContext();
+                            var document = await db.Documents.FirstOrDefaultAsync(d => d.Id == docId, cancellationToken);
+                            if (document is null)
+                            {
+                                return JsonResponse(new { error = $"Document with ID {docId} not found." });
+                            }
+
+                            db.Documents.Remove(document);
+                            await db.SaveChangesAsync(cancellationToken);
+
+                            return JsonResponse(new { success = true, id = docId });
                         }
 
                         // Returns Contract-type policy documents by emp id.
