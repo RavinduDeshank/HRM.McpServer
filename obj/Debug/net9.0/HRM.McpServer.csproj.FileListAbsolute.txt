@@ -69,3 +69,4 @@ C:\Users\ravin\source\HRM.McpServer\obj\Debug\net9.0\refint\HRM.McpServer.dll
 C:\Users\ravin\source\HRM.McpServer\obj\Debug\net9.0\HRM.McpServer.pdb
 C:\Users\ravin\source\HRM.McpServer\obj\Debug\net9.0\HRM.McpServer.genruntimeconfig.cache
 C:\Users\ravin\source\HRM.McpServer\obj\Debug\net9.0\ref\HRM.McpServer.dll
+C:\Users\ravin\source\HRM.McpServer\obj\Debug\net9.0\HRM.McpServer.sourcelink.json
