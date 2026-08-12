@@ -9,6 +9,22 @@ using HR.McpServer;
 // Stdio MCP server.
 class Program
 {
+    // Splits a Document's content into embedded DocumentChunk rows, ready to save.
+    static List<DocumentChunk> BuildChunks(Document document)
+    {
+        return DocumentEmbedding.ChunkText(document.Content)
+            .Select(text => new DocumentChunk
+            {
+                DocumentId = document.Id,
+                Type = document.Type,
+                EmployeeId = document.EmployeeId,
+                FileName = document.FileName,
+                Text = text,
+                Vector = DocumentEmbedding.SerializeVector(DocumentEmbedding.Embed(text))
+            })
+            .ToList();
+    }
+
     static async Task Main(string[] args)
     {
         using (var db = new EmployeeDbContext())
@@ -29,6 +45,21 @@ class Program
                     );
                 END");
 
+            // If DocumentChunks table (RAG vector index) not exist.
+            db.Database.ExecuteSqlRaw(@"
+                IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'DocumentChunks')
+                BEGIN
+                    CREATE TABLE [DocumentChunks] (
+                        [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+                        [DocumentId] uniqueidentifier NOT NULL,
+                        [Type] nvarchar(max) NOT NULL,
+                        [EmployeeId] nvarchar(max) NULL,
+                        [FileName] nvarchar(max) NOT NULL,
+                        [Text] nvarchar(max) NOT NULL,
+                        [Vector] nvarchar(max) NOT NULL
+                    );
+                END");
+
             // Sample Data
             if (!db.Employees.Any())
             {
@@ -36,6 +67,18 @@ class Program
                     new Employee { EmployeeId = "EMP001", Name = "Alice", Status = "Probation", CasualLeaveBalance = 0, SickLeaveBalance = 2, AnnualLeaveBalance = 0 },
                     new Employee { EmployeeId = "EMP002", Name = "Bob", Status = "Permanent", CasualLeaveBalance = 2, SickLeaveBalance = 5, AnnualLeaveBalance = 8 }
                 );
+                db.SaveChanges();
+            }
+
+            // Backfill: chunk+embed any already-uploaded document that has no chunks yet.
+            var chunkedDocIds = db.DocumentChunks.Select(c => c.DocumentId).Distinct().ToHashSet();
+            var unchunkedDocs = db.Documents.Where(d => !chunkedDocIds.Contains(d.Id)).ToList();
+            foreach (var doc in unchunkedDocs)
+            {
+                db.DocumentChunks.AddRange(BuildChunks(doc));
+            }
+            if (unchunkedDocs.Count > 0)
+            {
                 db.SaveChanges();
             }
         }
@@ -118,6 +161,22 @@ class Program
                                             ["id"] = new JsonSchemaProperty { Type = "string", Description = "The ID (GUID) of the document to delete" }
                                         },
                                         Required = new List<string> { "id" }
+                                    }
+                                },
+                                new Tool
+                                {
+                                    Name = "SearchDocuments",
+                                    Description = "RAG retrieval: returns the top-matching document chunks (by embedding similarity) for a query, scoped to global policies plus one employee's own contracts.",
+                                    InputSchema = new JsonSchema
+                                    {
+                                        Type = "object",
+                                        Properties = new Dictionary<string, JsonSchemaProperty>
+                                        {
+                                            ["query"] = new JsonSchemaProperty { Type = "string", Description = "The question/text to find relevant document chunks for" },
+                                            ["employeeId"] = new JsonSchemaProperty { Type = "string", Description = "Employee ID, used to scope which contract chunks are eligible" },
+                                            ["topK"] = new JsonSchemaProperty { Type = "number", Description = "Max number of chunks to return (default 6)" }
+                                        },
+                                        Required = new List<string> { "query" }
                                     }
                                 },
                                 new Tool
@@ -227,6 +286,7 @@ class Program
 
                             await using var db = new EmployeeDbContext();
                             db.Documents.Add(document);
+                            db.DocumentChunks.AddRange(BuildChunks(document));
                             await db.SaveChangesAsync(cancellationToken);
 
                             return JsonResponse(ToDto(document));
@@ -266,10 +326,57 @@ class Program
                                 return JsonResponse(new { error = $"Document with ID {docId} not found." });
                             }
 
+                            var chunksToRemove = db.DocumentChunks.Where(c => c.DocumentId == docId);
+                            db.DocumentChunks.RemoveRange(chunksToRemove);
                             db.Documents.Remove(document);
                             await db.SaveChangesAsync(cancellationToken);
 
                             return JsonResponse(new { success = true, id = docId });
+                        }
+
+                        // RAG retrieval: embeds the query, ranks chunks by cosine similarity, returns the top matches.
+                        if (request.Params?.Name == "SearchDocuments")
+                        {
+                            if (request.Params.Arguments?.TryGetValue("query", out var queryArg) is not true || queryArg is null)
+                            {
+                                throw new McpServerException("Missing required argument 'query'");
+                            }
+                            string query = queryArg.ToString() ?? string.Empty;
+
+                            string? empIdUpper = null;
+                            if (request.Params.Arguments.TryGetValue("employeeId", out var empIdArg) && empIdArg is not null)
+                            {
+                                empIdUpper = empIdArg.ToString()?.ToUpper();
+                            }
+
+                            int topK = 6;
+                            if (request.Params.Arguments.TryGetValue("topK", out var topKArg) && topKArg is not null
+                                && int.TryParse(topKArg.ToString(), out var parsedTopK))
+                            {
+                                topK = parsedTopK;
+                            }
+
+                            await using var db = new EmployeeDbContext();
+                            var candidates = await db.DocumentChunks
+                                .Where(c => c.Type == "Policy" ||
+                                    (c.Type == "Contract" && empIdUpper != null && c.EmployeeId != null && c.EmployeeId.ToUpper() == empIdUpper))
+                                .ToListAsync(cancellationToken);
+
+                            var queryVector = DocumentEmbedding.Embed(query);
+                            var topMatches = candidates
+                                .Select(c => new { Chunk = c, Score = DocumentEmbedding.CosineSimilarity(queryVector, DocumentEmbedding.DeserializeVector(c.Vector)) })
+                                .OrderByDescending(m => m.Score)
+                                .Take(topK)
+                                .Select(m => new
+                                {
+                                    fileName = m.Chunk.FileName,
+                                    type = m.Chunk.Type,
+                                    employeeId = m.Chunk.EmployeeId,
+                                    text = m.Chunk.Text,
+                                    score = m.Score
+                                });
+
+                            return JsonResponse(topMatches);
                         }
 
                         // Returns Contract-type policy documents by emp id.

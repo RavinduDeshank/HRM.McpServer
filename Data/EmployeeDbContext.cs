@@ -24,11 +24,24 @@ public class Document
     public DateTime UploadedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
+// One chunk of a Document's text plus its embedding vector, used for RAG similarity search.
+public class DocumentChunk
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid DocumentId { get; set; }
+    public string Type { get; set; } = string.Empty; // copied from Document, for scope filtering
+    public string? EmployeeId { get; set; } // copied from Document, for scope filtering
+    public string FileName { get; set; } = string.Empty; // copied from Document, for display
+    public string Text { get; set; } = string.Empty;
+    public string Vector { get; set; } = string.Empty; // comma-separated floats
+}
+
 // DB context.
 public class EmployeeDbContext : DbContext
 {
     public DbSet<Employee> Employees { get; set; } = null!;
     public DbSet<Document> Documents { get; set; } = null!;
+    public DbSet<DocumentChunk> DocumentChunks { get; set; } = null!;
 
     // Local SQL database.
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
@@ -42,5 +55,6 @@ public class EmployeeDbContext : DbContext
     {
         modelBuilder.Entity<Employee>().HasKey(e => e.EmployeeId);
         modelBuilder.Entity<Document>().HasKey(d => d.Id);
+        modelBuilder.Entity<DocumentChunk>().HasKey(c => c.Id);
     }
 }
